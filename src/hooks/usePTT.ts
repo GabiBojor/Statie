@@ -3,10 +3,8 @@ import { Audio } from 'expo-av';
 import { supabase } from '../lib/supabase';
 import { useStationStore } from '../store/stationStore';
 import { Platform } from 'react-native';
-// @ts-ignore
-import AudioRecord from 'react-native-audio-record';
-// @ts-ignore
-import PCMPlayer from 'react-native-pcm-player';
+// Safe Imports for Web/Native
+import { AudioRecord, PCMPlayer } from '../lib/audioModules';
 
 export function usePTT() {
     const [isRecording, setIsRecording] = useState(false);
