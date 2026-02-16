@@ -1,257 +1,253 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Audio } from 'expo-av';
-import { useStationStore } from '../store/stationStore';
 import { supabase } from '../lib/supabase';
-
-
+import { useStationStore } from '../store/stationStore';
+import { Platform } from 'react-native';
+// @ts-ignore
+import AudioRecord from 'react-native-audio-record';
+// @ts-ignore
+import PCMPlayer from 'react-native-pcm-player';
 
 export function usePTT() {
-    const [recording, setRecording] = useState<Audio.Recording | null>(null);
+    const [isRecording, setIsRecording] = useState(false);
+    const [receiving, setReceiving] = useState(false);
     const [permissionResponse, requestPermission] = Audio.usePermissions();
 
-    // Store actions
+    // Store
     const channel = useStationStore(state => state.channel);
-    const setTransmitting = useStationStore(state => state.setTransmitting);
-    const setReceiving = useStationStore(state => state.setReceiving);
-    const setLastReceivedTime = useStationStore(state => state.setLastReceivedTime);
+    const setTransmissionStatus = useStationStore(state => state.setTransmissionStatus);
 
-    async function startRecording() {
-        try {
-            if (recording) {
-                console.log('Cleaning up existing recording before starting new one...');
-                await recording.stopAndUnloadAsync();
-                setRecording(null);
+    // Realtime Subscription
+    const subscription = useRef<any>(null);
+    const myId = useRef(`user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`);
+
+    // --- Initialization ---
+    useEffect(() => {
+        if (Platform.OS !== 'web') {
+            // Initialize Recorder
+            const options = {
+                sampleRate: 16000,
+                channels: 1,
+                bitsPerSample: 16,
+                audioSource: 6,
+                wavFile: 'unused.wav'
+            };
+            AudioRecord.init(options);
+
+            // Listener for recorder data
+            AudioRecord.on('data', (base64Data: string) => {
+                broadcastAudioChunk(base64Data);
+            });
+        }
+
+        return () => {
+            if (Platform.OS !== 'web') {
+                AudioRecord.stop();
             }
+        };
+    }, []);
 
-            if (permissionResponse?.status !== 'granted') {
-                console.log('Requesting permission..');
-                const response = await requestPermission();
-                if (response.status !== 'granted') return;
-            }
+    // --- Channel Subscription ---
+    useEffect(() => {
+        console.log("Setting up Realtime for channel:", channel);
 
-            await Audio.setAudioModeAsync({
-                allowsRecordingIOS: true,
-                playsInSilentModeIOS: true,
-                staysActiveInBackground: true,
-                shouldDuckAndroid: true,
-                playThroughEarpieceAndroid: false,
+        if (subscription.current) {
+            supabase.removeChannel(subscription.current);
+        }
+
+        const channelInstance = supabase.channel(`statie-channel-${channel}`);
+
+        channelInstance
+            .on('broadcast', { event: 'voice_chunk' }, (payload) => {
+                // Filter out my own chunks
+                if (payload.payload.sender_id === myId.current) return;
+
+                handleIncomingChunk(payload.payload.data);
+            })
+            .subscribe((status) => {
+                if (status === 'SUBSCRIBED') {
+                    // console.log('Subscribed!');
+                }
             });
 
-            console.log('Starting recording..');
-            const { recording: newRecording } = await Audio.Recording.createAsync(
-                Audio.RecordingOptionsPresets.HIGH_QUALITY
-            );
+        subscription.current = channelInstance;
 
-            setRecording(newRecording);
-            setTransmitting(true);
-            console.log('Recording started');
+        return () => {
+            if (subscription.current) supabase.removeChannel(subscription.current);
+        }
+    }, [channel]);
+
+
+    // --- Recording Control ---
+    async function startRecording() {
+        try {
+            if (permissionResponse?.status !== 'granted') {
+                const resp = await requestPermission();
+                if (resp.status !== 'granted') return;
+            }
+
+            setIsRecording(true);
+            setTransmissionStatus('TX');
+
+            if (Platform.OS === 'web') {
+                startWebRecording();
+            } else {
+                AudioRecord.start();
+            }
+
         } catch (err) {
             console.error('Failed to start recording', err);
-            setTransmitting(false);
-            setRecording(null);
+            stopRecording();
         }
     }
 
     async function stopRecording() {
-        if (!recording) {
-            console.log('No active recording to stop');
-            setTransmitting(false);
-            return;
-        }
+        setIsRecording(false);
+        setTransmissionStatus('STBY');
 
-        try {
-            console.log('Stopping recording..');
-            const currentRecording = recording;
-            setRecording(null); // Clear state immediately to prevent re-entry
-            setTransmitting(false);
-
-            await currentRecording.stopAndUnloadAsync();
-            const uri = currentRecording.getURI();
-            console.log('Recording stopped and stored at', uri);
-
-            if (uri) {
-                uploadAudioAndSend(uri);
-            }
-        } catch (error) {
-            console.error('Error stopping recording:', error);
-            setTransmitting(false);
-            setRecording(null);
+        if (Platform.OS === 'web') {
+            stopWebRecording();
+        } else {
+            await AudioRecord.stop();
         }
     }
 
-    async function uploadAudioAndSend(uri: string) {
-        try {
-            console.log('Preparing to upload audio from:', uri);
-            let fileBody: any;
-            let contentType: string;
-            let extension: string;
 
-            if (typeof window !== 'undefined' && window.document) {
-                // WEB: Fetch the blob from the URI
-                const response = await fetch(uri);
-                const blob = await response.blob();
-                console.log('Web Blob size:', blob.size, 'type:', blob.type);
+    // --- Web Recording Logic ---
+    const mediaRecorderRef = useRef<any>(null);
 
-                if (blob.size === 0) {
-                    throw new Error('Recorded blob is empty');
+    function startWebRecording() {
+        if (typeof window === 'undefined') return;
+
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+            // Use AudioContext to get raw PCM for compatibility with Mobile Player
+            const context = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+            const source = context.createMediaStreamSource(stream);
+            const processor = context.createScriptProcessor(4096, 1, 1);
+
+            processor.onaudioprocess = (e) => {
+                const inputData = e.inputBuffer.getChannelData(0);
+                // Convert Float32 to Int16 PCM
+                const pcmBuffer = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    const s = Math.max(-1, Math.min(1, inputData[i]));
+                    pcmBuffer[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                 }
 
-                fileBody = blob;
-                contentType = blob.type || 'audio/webm';
-                // Extract extension from mime type or default to webm
-                extension = contentType.includes('mp4') ? 'm4a' :
-                    contentType.includes('webm') ? 'webm' :
-                        contentType.includes('ogg') ? 'ogg' : 'wav';
-            } else {
-                // MOBILE: Use FormData
-                const fileName = `audio-${Date.now()}.m4a`;
-                const formData = new FormData();
-                // @ts-ignore
-                formData.append('file', {
-                    uri,
-                    name: fileName,
-                    type: 'audio/m4a',
-                });
-                fileBody = formData;
-                contentType = 'audio/m4a';
-                extension = 'm4a';
-            }
+                // Convert to Base64
+                let binary = '';
+                const uint8 = new Uint8Array(pcmBuffer.buffer);
+                const len = uint8.byteLength;
+                for (let i = 0; i < len; i++) {
+                    binary += String.fromCharCode(uint8[i]);
+                }
+                const base64 = window.btoa(binary);
 
-            const finalFileName = `audio-${Date.now()}.${extension}`;
-            console.log('Uploading as:', finalFileName, 'with type:', contentType);
+                broadcastAudioChunk(base64);
+            };
 
-            // 1. Upload File
-            const { data: uploadData, error: uploadError } = await supabase.storage
-                .from('statie-audio')
-                .upload(finalFileName, fileBody, {
-                    contentType,
-                    upsert: false
-                });
+            source.connect(processor);
+            processor.connect(context.destination);
 
-            if (uploadError) throw uploadError;
+            mediaRecorderRef.current = {
+                stop: () => {
+                    processor.disconnect();
+                    source.disconnect();
+                    context.close();
+                    stream.getTracks().forEach(t => t.stop());
+                }
+            };
+        });
+    }
 
-            // 2. Get Public URL
-            const { data: { publicUrl } } = supabase.storage
-                .from('statie-audio')
-                .getPublicUrl(finalFileName);
-
-            // 3. Insert Message Record (for history)
-            const { error: dbError } = await supabase
-                .from('statie_messages')
-                .insert({
-                    channel: channel,
-                    audio_url: publicUrl,
-                    created_at: new Date().toISOString()
-                });
-
-            if (dbError) throw dbError;
-
-            // 4. ALSO BROADCAST (Faster & more reliable for PTT)
-            const channelInstance = supabase.channel(`statie-channel-${channel}`);
-            channelInstance.send({
-                type: 'broadcast',
-                event: 'voice_msg',
-                payload: { audio_url: publicUrl, channel: channel }
-            });
-
-            console.log('Audio sent successfully!', publicUrl);
-
-        } catch (error) {
-            console.error('Error sending audio:', error);
+    function stopWebRecording() {
+        if (mediaRecorderRef.current) {
+            mediaRecorderRef.current.stop();
+            mediaRecorderRef.current = null;
         }
     }
 
-    async function playSound(uri: string) {
-        try {
-            console.log('Loading Sound', uri);
 
-            // Check if URI is valid
-            if (!uri) return;
+    // --- Broadcasting ---
+    async function broadcastAudioChunk(base64Data: string) {
+        if (!subscription.current) return;
 
-            // Standardize Audio Mode for playback
-            await Audio.setAudioModeAsync({
-                allowsRecordingIOS: false,
-                playsInSilentModeIOS: true,
-                staysActiveInBackground: true,
-                shouldDuckAndroid: true,
-                playThroughEarpieceAndroid: false,
-            });
+        await subscription.current.send({
+            type: 'broadcast',
+            event: 'voice_chunk',
+            payload: {
+                data: base64Data,
+                sender_id: myId.current
+            }
+        });
+    }
 
-            const { sound } = await Audio.Sound.createAsync(
-                { uri },
-                { shouldPlay: true, volume: 1.0 },
-                (status) => {
-                    if (status.isLoaded && status.didJustFinish) {
-                        setReceiving(false);
-                        sound.unloadAsync();
-                    }
-                }
-            );
 
-            setReceiving(true);
-        } catch (e) {
-            console.error('Error playing sound:', e);
+    // --- Playback Logic ---
+    const rxTimeout = useRef<NodeJS.Timeout | null>(null);
+
+    function handleIncomingChunk(base64Data: string) {
+        setReceiving(true);
+        setTransmissionStatus('RX');
+
+        if (Platform.OS === 'web') {
+            playWebPCM(base64Data);
+        } else {
+            // Mobile Playback
+            PCMPlayer.play(base64Data);
+        }
+
+        if (rxTimeout.current) clearTimeout(rxTimeout.current);
+        rxTimeout.current = setTimeout(() => {
             setReceiving(false);
-        }
+            setTransmissionStatus('STBY');
+        }, 500);
     }
 
-    // Subscribe to Incoming Audio (Double Pipe: Postgres + Broadcast)
-    useEffect(() => {
-        console.log(`[Realtime] Subscribing to channel ${channel}...`);
+    // Web PCM Player
+    const audioContext = useRef<AudioContext | null>(null);
+    const nextStartTime = useRef<number>(0);
 
-        const subscription = supabase
-            .channel(`statie-channel-${channel}`, {
-                config: {
-                    broadcast: { self: false },
-                },
-            })
-            // Pipe 1: Broadcast (Instant)
-            .on(
-                'broadcast',
-                { event: 'voice_msg' },
-                (payload) => {
-                    console.log('[Realtime-Broadcast] Message received!', payload);
-                    if (payload.payload.channel === channel) {
-                        setLastReceivedTime(new Date().toLocaleTimeString() + " (BC)");
-                        playSound(payload.payload.audio_url);
-                    }
-                }
-            )
-            // Pipe 2: Postgres Changes (Reliability fallback)
-            .on(
-                'postgres_changes',
-                {
-                    event: 'INSERT',
-                    schema: 'public',
-                    table: 'statie_messages',
-                    // Removing filter temporarily to be 100% sure we get data
-                },
-                (payload) => {
-                    console.log('[Realtime-Postgres] Message received!', payload.new);
-                    // Only play if it matches our channel and we haven't played it yet (ideally)
-                    if (payload.new.channel === channel) {
-                        setLastReceivedTime(new Date().toLocaleTimeString() + " (DB)");
-                        playSound(payload.new.audio_url);
-                    }
-                }
-            )
-            .subscribe((status) => {
-                console.log(`[Realtime] Subscription status: ${status}`);
-                if (status === 'SUBSCRIBED') {
-                    console.log(`[Realtime] ✅ Connected to channel ${channel}`);
-                }
-            });
+    function playWebPCM(base64Data: string) {
+        if (typeof window === 'undefined') return;
 
-        return () => {
-            console.log(`[Realtime] Unsubscribing from channel ${channel}`);
-            subscription.unsubscribe();
-        };
-    }, [channel]);
+        if (!audioContext.current) {
+            audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+            nextStartTime.current = audioContext.current.currentTime;
+        }
+
+        const ctx = audioContext.current;
+        const binaryString = window.atob(base64Data);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+
+        const float32 = new Float32Array(len / 2);
+        const dataView = new DataView(bytes.buffer);
+
+        for (let i = 0; i < len / 2; i++) {
+            const int16 = dataView.getInt16(i * 2, true);
+            float32[i] = int16 / 32768.0;
+        }
+
+        const buffer = ctx.createBuffer(1, float32.length, 16000);
+        buffer.getChannelData(0).set(float32);
+
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+
+        const playTime = Math.max(ctx.currentTime, nextStartTime.current);
+        source.start(playTime);
+        nextStartTime.current = playTime + buffer.duration;
+    }
 
     return {
-        recording,
+        isRecording,
+        receiving,
         startRecording,
-        stopRecording,
-        playSound
+        stopRecording
     };
 }
