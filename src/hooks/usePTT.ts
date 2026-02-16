@@ -81,15 +81,30 @@ export function usePTT() {
 
     async function uploadAudioAndSend(uri: string) {
         try {
-            const fileName = `audio-${Date.now()}.m4a`;
-            let fileBody;
+            console.log('Preparing to upload audio from:', uri);
+            let fileBody: any;
+            let contentType: string;
+            let extension: string;
 
             if (typeof window !== 'undefined' && window.document) {
                 // WEB: Fetch the blob from the URI
                 const response = await fetch(uri);
-                fileBody = await response.blob();
+                const blob = await response.blob();
+                console.log('Web Blob size:', blob.size, 'type:', blob.type);
+
+                if (blob.size === 0) {
+                    throw new Error('Recorded blob is empty');
+                }
+
+                fileBody = blob;
+                contentType = blob.type || 'audio/webm';
+                // Extract extension from mime type or default to webm
+                extension = contentType.includes('mp4') ? 'm4a' :
+                    contentType.includes('webm') ? 'webm' :
+                        contentType.includes('ogg') ? 'ogg' : 'wav';
             } else {
                 // MOBILE: Use FormData
+                const fileName = `audio-${Date.now()}.m4a`;
                 const formData = new FormData();
                 // @ts-ignore
                 formData.append('file', {
@@ -98,13 +113,18 @@ export function usePTT() {
                     type: 'audio/m4a',
                 });
                 fileBody = formData;
+                contentType = 'audio/m4a';
+                extension = 'm4a';
             }
+
+            const finalFileName = `audio-${Date.now()}.${extension}`;
+            console.log('Uploading as:', finalFileName, 'with type:', contentType);
 
             // 1. Upload File
             const { data: uploadData, error: uploadError } = await supabase.storage
                 .from('statie-audio')
-                .upload(fileName, fileBody, {
-                    contentType: 'audio/m4a',
+                .upload(finalFileName, fileBody, {
+                    contentType,
                     upsert: false
                 });
 
@@ -113,7 +133,7 @@ export function usePTT() {
             // 2. Get Public URL
             const { data: { publicUrl } } = supabase.storage
                 .from('statie-audio')
-                .getPublicUrl(fileName);
+                .getPublicUrl(finalFileName);
 
             // 3. Insert Message Record (for history)
             const { error: dbError } = await supabase
@@ -144,7 +164,11 @@ export function usePTT() {
     async function playSound(uri: string) {
         try {
             console.log('Loading Sound', uri);
-            // Ensure audio mode is set for playback on speaker
+
+            // Check if URI is valid
+            if (!uri) return;
+
+            // Standardize Audio Mode for playback
             await Audio.setAudioModeAsync({
                 allowsRecordingIOS: false,
                 playsInSilentModeIOS: true,
@@ -155,15 +179,16 @@ export function usePTT() {
 
             const { sound } = await Audio.Sound.createAsync(
                 { uri },
-                { shouldPlay: true }
-            );
-            setReceiving(true);
-
-            sound.setOnPlaybackStatusUpdate((status) => {
-                if (status.isLoaded && status.didJustFinish) {
-                    setReceiving(false);
+                { shouldPlay: true, volume: 1.0 },
+                (status) => {
+                    if (status.isLoaded && status.didJustFinish) {
+                        setReceiving(false);
+                        sound.unloadAsync();
+                    }
                 }
-            });
+            );
+
+            setReceiving(true);
         } catch (e) {
             console.error('Error playing sound:', e);
             setReceiving(false);
