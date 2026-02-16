@@ -82,19 +82,31 @@ export function usePTT() {
     async function uploadAudioAndSend(uri: string) {
         try {
             const fileName = `audio-${Date.now()}.m4a`;
-            const formData = new FormData();
+            let fileBody;
 
-            // @ts-ignore: React Native ignores some FormData types
-            formData.append('file', {
-                uri,
-                name: fileName,
-                type: 'audio/m4a',
-            });
+            if (typeof window !== 'undefined' && window.document) {
+                // WEB: Fetch the blob from the URI
+                const response = await fetch(uri);
+                fileBody = await response.blob();
+            } else {
+                // MOBILE: Use FormData
+                const formData = new FormData();
+                // @ts-ignore
+                formData.append('file', {
+                    uri,
+                    name: fileName,
+                    type: 'audio/m4a',
+                });
+                fileBody = formData;
+            }
 
             // 1. Upload File
             const { data: uploadData, error: uploadError } = await supabase.storage
                 .from('statie-audio')
-                .upload(fileName, formData as any);
+                .upload(fileName, fileBody, {
+                    contentType: 'audio/m4a',
+                    upsert: false
+                });
 
             if (uploadError) throw uploadError;
 

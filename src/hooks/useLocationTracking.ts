@@ -8,33 +8,44 @@ export function useLocationTracking() {
 
     useEffect(() => {
         (async () => {
-            let { status } = await Location.requestForegroundPermissionsAsync();
-            if (status !== 'granted') {
-                setErrorMsg('Permission to access location was denied');
-                return;
-            }
-
-            // Initial location
-            let location = await Location.getCurrentPositionAsync({});
-            setLocation({
-                latitude: location.coords.latitude,
-                longitude: location.coords.longitude
-            });
-
-            // Track changes
-            await Location.watchPositionAsync(
-                {
-                    accuracy: Location.Accuracy.High,
-                    timeInterval: 5000,
-                    distanceInterval: 10
-                },
-                (newLocation) => {
-                    setLocation({
-                        latitude: newLocation.coords.latitude,
-                        longitude: newLocation.coords.longitude
-                    });
+            try {
+                let { status } = await Location.requestForegroundPermissionsAsync();
+                if (status !== 'granted') {
+                    setErrorMsg('Permission to access location was denied');
+                    return;
                 }
-            );
+
+                // Initial location with fallback
+                try {
+                    let location = await Location.getCurrentPositionAsync({
+                        accuracy: Location.Accuracy.Balanced,
+                    });
+                    setLocation({
+                        latitude: location.coords.latitude,
+                        longitude: location.coords.longitude
+                    });
+                } catch (e) {
+                    console.log('Initial location failed, waiting for watch...', e);
+                }
+
+                // Track changes
+                await Location.watchPositionAsync(
+                    {
+                        accuracy: Location.Accuracy.Balanced,
+                        timeInterval: 5000,
+                        distanceInterval: 10
+                    },
+                    (newLocation) => {
+                        setLocation({
+                            latitude: newLocation.coords.latitude,
+                            longitude: newLocation.coords.longitude
+                        });
+                    }
+                );
+            } catch (err) {
+                console.error('Location tracking error:', err);
+                setErrorMsg('Error initializing location tracking');
+            }
         })();
     }, []);
 
