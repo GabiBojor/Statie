@@ -76,21 +76,36 @@ export function usePTT() {
     }, [channel]);
 
 
+    // State to track interruptions
+    const stopRequested = useRef(false);
+    const recordingRef = useRef<boolean>(false); // Sync ref for immediate logic
+
     // --- Recording Control ---
     async function startRecording() {
+        stopRequested.current = false;
+
         try {
             if (permissionResponse?.status !== 'granted') {
                 const resp = await requestPermission();
                 if (resp.status !== 'granted') return;
             }
 
+            // Guard: If released before permission granted
+            if (stopRequested.current) return;
+
             setIsRecording(true);
+            recordingRef.current = true;
             setTransmissionStatus('TX');
 
             if (Platform.OS === 'web') {
                 startWebRecording();
             } else {
-                AudioRecord.start();
+                await AudioRecord.start();
+            }
+
+            // Double check in case stopped during async start
+            if (stopRequested.current) {
+                stopRecording();
             }
 
         } catch (err) {
@@ -100,13 +115,24 @@ export function usePTT() {
     }
 
     async function stopRecording() {
+        stopRequested.current = true;
+
+        if (!recordingRef.current && !isRecording) {
+            return;
+        }
+
         setIsRecording(false);
+        recordingRef.current = false;
         setTransmissionStatus('STBY');
 
         if (Platform.OS === 'web') {
             stopWebRecording();
         } else {
-            await AudioRecord.stop();
+            try {
+                await AudioRecord.stop();
+            } catch (e) {
+                // Ignore stop errors if not recording
+            }
         }
     }
 

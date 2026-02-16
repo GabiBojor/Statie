@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { View, TouchableOpacity, StyleSheet, Text, Animated, Easing } from 'react-native';
+import { View, TouchableOpacity, Pressable, StyleSheet, Text, Animated, Easing } from 'react-native';
 import { Mic, Power, ChevronUp, ChevronDown, Plus } from 'lucide-react-native';
 
 interface ControlPanelProps {
@@ -73,18 +73,22 @@ export default function ControlPanel({
                     />
                 )}
 
-                <TouchableOpacity
-                    style={[styles.pttButton, isTransmitting && styles.pttActive]}
+                <Pressable
+                    style={({ pressed }) => [
+                        styles.pttButton,
+                        (isTransmitting || pressed) && styles.pttActive
+                    ]}
                     onPressIn={onPTTPressIn}
                     onPressOut={onPTTPressOut}
-                    activeOpacity={0.8}
+                    delayLongPress={2000} // Prevent native long press behavior stealing the touch
+                    hitSlop={20}
                 >
                     <Mic size={32} color={isTransmitting ? '#00FF00' : '#555'} />
                     <Text style={[styles.pttText, isTransmitting && styles.pttTextActive]}>
                         {isTransmitting ? 'LISTENING...' : 'HOLD TO TALK'}
                     </Text>
                     <View style={[styles.pttIndicator, isTransmitting && styles.pttIndicatorActive]} />
-                </TouchableOpacity>
+                </Pressable>
             </View>
         </View>
     );
