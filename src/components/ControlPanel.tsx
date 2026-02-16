@@ -73,22 +73,33 @@ export default function ControlPanel({
                     />
                 )}
 
-                <Pressable
-                    style={({ pressed }) => [
+                <View
+                    style={[
                         styles.pttButton,
-                        (isTransmitting || pressed) && styles.pttActive
+                        isTransmitting && styles.pttActive
                     ]}
-                    onPressIn={onPTTPressIn}
-                    onPressOut={onPTTPressOut}
-                    delayLongPress={2000} // Prevent native long press behavior stealing the touch
-                    hitSlop={20}
+                    onTouchStart={() => {
+                        console.log('PTT Touch Start');
+                        onPTTPressIn();
+                    }}
+                    onTouchEnd={() => {
+                        console.log('PTT Touch End');
+                        onPTTPressOut();
+                    }}
+                    onTouchCancel={() => {
+                        console.log('PTT Touch Cancel');
+                        onPTTPressOut();
+                    }}
+                    // Capture gestures to prevent scrolling/parent interference
+                    onStartShouldSetResponder={() => true}
+                    onMoveShouldSetResponder={() => true}
                 >
                     <Mic size={32} color={isTransmitting ? '#00FF00' : '#555'} />
                     <Text style={[styles.pttText, isTransmitting && styles.pttTextActive]}>
                         {isTransmitting ? 'LISTENING...' : 'HOLD TO TALK'}
                     </Text>
                     <View style={[styles.pttIndicator, isTransmitting && styles.pttIndicatorActive]} />
-                </Pressable>
+                </View>
             </View>
         </View>
     );
